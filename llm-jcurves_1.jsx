@@ -1,6 +1,7 @@
 import React, { useState, useRef } from "react";
 
 const GENS = 4;
+const TRAIN_SPEND_MONTHS = 3;
 const GEN_COLORS = ["#00D4FF", "#00FF94", "#FFB800", "#FF4D6D"];
 const REV_COLOR = "#C084FC";
 
@@ -34,11 +35,12 @@ export default function App() {
   const [margin, setMargin] = useState(45);
   const [lifespan, setLifespan] = useState(18);
   const [growth, setGrowth] = useState(80);
+  const [growthDecay, setGrowthDecay] = useState(0);
   const [costMult, setCostMult] = useState(3);
   // Initial conditions
   const [initRevMM, setInitRevMM] = useState(250);   // monthly revenue $mm
   const [initTrainMM, setInitTrainMM] = useState(500); // Gen-1 training cost $mm
-  const [hwOffset, setHwOffset] = useState(3);         // hardware efficiency offset (raw 10x → dollar xMult)
+  const [hwOffset, setHwOffset] = useState(1);         // training efficiency per $ (1x = neutral)
 
   const [hoveredGen, setHoveredGen] = useState(null);
   const [showGlossary, setShowGlossary] = useState(false);
@@ -46,11 +48,13 @@ export default function App() {
 
   const m = margin / 100;
   const g = growth / 100;
-  const gM = Math.pow(1 + g, 1 / 12) - 1; // monthly growth
+  const decay = growthDecay / 100;
+  const decayedAnnualGrowth = g * (1 - decay);
+  const genAnnualGrowth = Array.from({ length: GENS }, (_, i) => (i === 0 ? g : decayedAnnualGrowth));
+  const genMonthlyGrowth = genAnnualGrowth.map(ga => Math.pow(1 + ga, 1 / 12) - 1);
 
-  // Effective dollar cost growth combines scaling pressure and hardware efficiency.
-  // Higher hwOffset means better efficiency, so it reduces effective cost growth.
-  const effectiveCostMult = costMult * (3 / hwOffset);
+  // Effective dollar cost growth = scaling pressure divided by efficiency gains.
+  const effectiveCostMult = costMult / hwOffset;
   // Training costs: Gen-1 = initTrainMM, each subsequent gen × effectiveCostMult
   const trainingCosts = Array.from({ length: GENS }, (_, i) =>
     Math.round(initTrainMM * Math.pow(effectiveCostMult, i))
@@ -61,17 +65,19 @@ export default function App() {
   let rv = initRevMM;
   for (let i = 0; i < GENS; i++) {
     startRevs.push(rv);
-    rv = rv * Math.pow(1 + g, lifespan / 12);
+    rv = rv * Math.pow(1 + genAnnualGrowth[i], lifespan / 12);
   }
 
   // Cumulative P&L curve per gen
   const buildCurve = (gi) => {
     const tc = trainingCosts[gi];
     const r0 = startRevs[gi];
-    const pts = [-tc];
-    let cum = -tc;
+    const monthlyTrainSpend = tc / TRAIN_SPEND_MONTHS;
+    const pts = [0];
+    let cum = 0;
     for (let mo = 1; mo <= lifespan; mo++) {
-      cum += r0 * Math.pow(1 + gM, mo - 1) * m;
+      const trainSpend = mo <= TRAIN_SPEND_MONTHS ? monthlyTrainSpend : 0;
+      cum += r0 * Math.pow(1 + genMonthlyGrowth[gi], mo - 1) * m - trainSpend;
       pts.push(cum);
     }
     return pts;
@@ -83,7 +89,7 @@ export default function App() {
     for (let gi = 0; gi < GENS; gi++) {
       const r0 = startRevs[gi];
       for (let mo = 0; mo <= lifespan; mo++) {
-        pts.push({ mo: gi * lifespan + mo, arr: r0 * Math.pow(1 + gM, mo) * 12 });
+        pts.push({ mo: gi * lifespan + mo, arr: r0 * Math.pow(1 + genMonthlyGrowth[gi], mo) * 12 });
       }
     }
     return pts;
@@ -157,7 +163,7 @@ export default function App() {
     const selfFunded = nextCost !== null ? finalVal >= nextCost : finalVal > 0;
     const ratio = (nextCost || trainingCosts[i]) / (startRevs[i] * lifespan * m);
     const reqG = ratio <= 1 ? 0 : (Math.pow(ratio, 12 / lifespan) - 1) * 100;
-    const endARR = startRevs[i] * Math.pow(1 + gM, lifespan) * 12;
+    const endARR = startRevs[i] * Math.pow(1 + genMonthlyGrowth[i], lifespan) * 12;
     const rARR = reqARR(i);
     const capitalGap = nextCost ? Math.max(0, nextCost - finalVal) : 0;
     return { finalVal, nextCost, selfFunded, reqG, endARR, rARR, capitalGap };
@@ -189,7 +195,9 @@ export default function App() {
           <div style={{ fontSize: 16, fontWeight: 700, color: allSelfFunded ? "#00FF94" : "#FF4D6D" }}>
             {allSelfFunded ? "✓ All gens self-fund" : firstBreak >= 0 ? `✗ Breaks at Gen ${firstBreak + 1}` : "✗ Never self-funds"}
           </div>
-          <div style={{ fontSize: 11, color: "#4A5568", marginTop: 2 }}>at {growth}% growth / {margin}% margin</div>
+          <div style={{ fontSize: 11, color: "#4A5568", marginTop: 2 }}>
+            at {growth}% Gen-1 growth / {growthDecay}% decay / {margin}% margin
+          </div>
         </div>
         <div>
           <div style={{ fontSize: 10, color: "#718096", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 4 }}>Total Capital Needed</div>
@@ -222,11 +230,11 @@ export default function App() {
             disp={v => `$${v}mm/mo`} color={REV_COLOR} isInput />
           <SliderRow label="Gen-1 Training Cost ($mm)" value={initTrainMM} set={setInitTrainMM} min={10} max={2000} step={10}
             disp={v => `$${v}mm`} color="#F97316" isInput />
-          <SliderRow label="Hardware Efficiency Offset" value={hwOffset} set={setHwOffset} min={1} max={10} step={0.5}
+          <SliderRow label="Training Efficiency per $" value={hwOffset} set={setHwOffset} min={1} max={10} step={0.5}
             disp={v => `${v}x`} color="#94A3B8" isInput />
         </div>
         <div style={{ fontSize: 10, color: "#334155", marginBottom: 14, paddingLeft: 2 }}>
-          Effective training multiplier = Scaling Law Multiplier x (3 / Hardware Efficiency Offset). Higher hardware efficiency lowers dollar cost growth across generations.
+          Effective training multiplier = Scaling Law Multiplier / Training Efficiency per $. Example: 10x scaling pressure and 2x efficiency implies 5x dollar cost growth per generation.
         </div>
       </div>
 
@@ -235,11 +243,12 @@ export default function App() {
         <div style={{ fontSize: 11, color: "#00D4FF", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8, fontWeight: 600 }}>
           ⚙ Model Assumptions
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 10, marginBottom: 14 }}>
           <SliderRow label="Inference Margin" value={margin} set={setMargin} min={0} max={100} step={1} disp={v => `${v}%`} />
           <SliderRow label="Model Dominance (months)" value={lifespan} set={setLifespan} min={3} max={48} step={3} disp={v => `${v} mo`} />
-          <SliderRow label="Revenue Growth" value={growth} set={setGrowth} min={0} max={1000} step={10} disp={v => `${v}%`} />
-          <SliderRow label="Scaling Law Multiplier" value={costMult} set={setCostMult} min={1} max={10} step={0.5} disp={v => `${v}x`} />
+          <SliderRow label="Revenue Growth (Gen 1)" value={growth} set={setGrowth} min={0} max={1000} step={10} disp={v => `${v}%`} />
+          <SliderRow label="Growth Decay" value={growthDecay} set={setGrowthDecay} min={0} max={100} step={1} disp={v => `${v}%`} />
+          <SliderRow label="Scaling Law Multiplier (compute/gen)" value={costMult} set={setCostMult} min={1} max={10} step={0.5} disp={v => `${v}x`} />
         </div>
       </div>
 
@@ -324,8 +333,6 @@ export default function App() {
                   <line x1={x0} y1={0} x2={x0} y2={chartH} stroke="#1A2D42" strokeWidth={1} />
                   <text x={midX} y={-24} textAnchor="middle" fill={hoveredGen === i ? GEN_COLORS[i] : GEN_COLORS[i] + "99"} fontSize={FS + 1} fontWeight={700} letterSpacing="0.06em">GEN {i + 1}</text>
                   <text x={midX} y={-11} textAnchor="middle" fill="#263347" fontSize={FS - 1}>tc {fmtM(trainingCosts[i])}</text>
-                  <line x1={x0} y1={yZero} x2={x0} y2={yS(-trainingCosts[i])} stroke={GEN_COLORS[i]} strokeWidth={1} strokeDasharray="2 3" strokeOpacity={0.5} />
-                  <circle cx={x0} cy={yS(-trainingCosts[i])} r={3} fill={GEN_COLORS[i]} opacity={0.7} />
                 </g>
               );
             })}
@@ -418,8 +425,8 @@ export default function App() {
             {s.rARR && <div style={{ fontSize: 12, color: "#718096", marginBottom: 2 }}>Req. ARR: <span style={{ color: s.endARR >= s.rARR ? "#00FF94" : "#FF4D6D", fontWeight: 600 }}>{fmtA(s.rARR)}/yr</span></div>}
             {!s.selfFunded && s.capitalGap > 0 && <div style={{ fontSize: 12, color: "#718096", marginBottom: 2 }}>Capital gap: <span style={{ color: "#FF4D6D", fontWeight: 600 }}>{fmtM(s.capitalGap)}</span></div>}
             <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #1A2535", fontSize: 11, color: "#718096" }}>
-              Req growth: <span style={{ color: s.reqG <= growth ? "#00FF94" : "#FFB800", fontWeight: 700 }}>{s.reqG.toFixed(0)}%</span>
-              <span style={{ color: "#2D3748" }}> vs {growth}% actual</span>
+              Req growth: <span style={{ color: s.reqG <= genAnnualGrowth[i] * 100 ? "#00FF94" : "#FFB800", fontWeight: 700 }}>{s.reqG.toFixed(0)}%</span>
+              <span style={{ color: "#2D3748" }}> vs {(genAnnualGrowth[i] * 100).toFixed(0)}% actual</span>
             </div>
           </div>
         ))}
@@ -441,12 +448,12 @@ export default function App() {
               {[
                 ["Gen-1 Monthly Revenue (R_1,0)", "Starting monthly revenue run-rate for Generation 1 (in $mm/month). This is the revenue base that compounds during Gen-1 dominance. Higher starting revenue raises gross profit accumulation and improves self-funding odds."],
                 ["Gen-1 Training Cost (C_1)", "Upfront training spend for the first frontier model (in $mm). Every later generation cost is derived from this base via the effective cost multiplier. Higher C_1 deepens the initial J-curve drawdown."],
-                ["Scaling Law Multiplier (k)", "The raw compute required to produce a meaningfully better model grows approximately 10x per generation. This is the 'Scaling Law.' In dollar terms, hardware improvements (Moore's Law) partially offset this, so the actual dollar cost per generation grows by a smaller multiplier k (typically 3–5x). Formally: Cost_n = Cost_1 × k^(n−1)."],
-                ["Hardware Efficiency Offset", "The ratio by which chip performance improves per generation, reducing the dollar translation of the 10x raw compute increase. If chips get 3x more efficient per generation, a 10x compute increase costs only ~3x more in dollars."],
-                ["Effective Cost Multiplier (k_eff)", "Per-generation dollar cost growth used by this simulator after combining scaling pressure and hardware efficiency. Here: k_eff = (k / h) × 3, where k is Scaling Law Multiplier and h is Hardware Efficiency Offset."],
+                ["Scaling Law Multiplier (k)", "The raw compute required to produce a meaningfully better model each generation (for example, 10x). This captures frontier-scaling pressure before efficiency gains are applied."],
+                ["Training Efficiency per $ (h)", "How much cheaper training becomes per generation from hardware and systems gains. At h = 2x, each unit of training compute costs half as much in dollars versus prior generation."],
+                ["Effective Cost Multiplier (k_eff)", "Per-generation dollar cost growth after offsetting scaling pressure with efficiency gains. Here: k_eff = k / h, where k is Scaling Law Multiplier and h is Training Efficiency per $."],
                 ["Model Dominance (months)", "The number of months a model remains the frontier model before being surpassed by a competitor or successor. This is the critical lifespan over which it must generate enough gross profit to fund the next training run. Shorter dominance = steeper treadmill."],
                 ["Inference Margin (%)", "The fraction of revenue retained after paying the cost of serving model outputs (GPU time, data center, networking). At 45%, for every $1 of revenue, $0.45 is available to cover training costs. This is the unit economics floor of the business."],
-                ["Revenue Growth (%/yr)", "Annual growth rate of the company's revenue run-rate, held flat across all generations (no acceleration assumed). This is compared against the Required Growth Rate to determine whether the treadmill is sustainable."],
+                ["Revenue Growth (%/yr)", "Gen-1 annual growth is set directly by the Revenue Growth slider. Later generations use a decayed rate: g_later = g_gen1 x (1 - growth_decay). At 100% decay, later-generation revenue is flat."],
                 ["J-Curve", "Each model generation's cumulative P&L follows a J-curve: a sharp drop at t=0 when training cost hits (before any revenue), followed by a gradual climb as monthly gross profit accumulates. The curve must cross zero and ideally reach the next training cost threshold to self-fund."],
                 ["Self-Funding", "A generation is self-funding if the gross profit accumulated during its dominance period equals or exceeds the training cost of the next generation. If not self-funding, the company must raise outside capital to train the next model — the venture treadmill."],
                 ["Required ARR", "The minimum annual revenue run-rate needed at the end of a generation for its accumulated gross profit to cover the next gen's training cost. Formula: Required ARR = (Next Training Cost) / (Lifespan × Margin) × 12."],
@@ -466,10 +473,10 @@ export default function App() {
                 {[
                   ["Initial Revenue (Gen 1, month 0)", "R_1,0 = initRevMM", "starting monthly revenue input in $mm/mo"],
                   ["Initial Training Cost (Gen 1)", "C_1 = initTrainMM", "base training cost input in $mm"],
-                  ["Effective Cost Multiplier", "k_eff = (k / h) × 3", "k = scaling law multiplier, h = hardware efficiency offset"],
+                  ["Effective Cost Multiplier", "k_eff = k / h", "k = scaling law multiplier, h = training efficiency per $"],
                   ["Raw Scaling Pressure (compute proxy)", "Compute_n ∝ k^(n−1)", "illustrative scaling-law pressure before hardware-efficiency adjustment"],
                   ["All-in Cost Proxy", "C_n = C_1 × k_eff^(n−1)", "toy assumption: compute and non-compute training costs are blended into one effective cost series"],
-                  ["Monthly Revenue (Gen n, month m)", "R(n,m) = R_0 × (1+g_monthly)^m", "where g_monthly = (1+g_annual)^(1/12) − 1"],
+                  ["Monthly Revenue (Gen n, month m)", "R(n,m) = R_n,0 × (1+g_n,monthly)^m", "where g_n,monthly = (1+g_n,annual)^(1/12) − 1 and g_n,annual is decayed after Gen 1"],
                   ["Gross Profit (Gen n)", "GP_n = Σ R(n,m) × margin   [m=0..L]", "sum of monthly GP over dominance period L"],
                   ["Self-Funding Condition", "GP_n ≥ C_(n+1)", "GP this gen must cover NEXT gen's training cost"],
                   ["Required Growth Rate", "g_req = (C_(n+1) / (R_n × L × margin))^(12/L) − 1", "annual growth needed to self-fund next gen"],
